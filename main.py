@@ -22,16 +22,16 @@ class Active_Classifier:
         self.view_param = {}
 
         self.part[0] = get_perspective_kernels([[0, 0, 1], [0, 0, 1], [0, 0, 1]], scale=1)
-        self.view_param[0] = get_perspective_kernels([[0, 0, self.perspective_dim[0]], [-0.2, 0.2, self.perspective_dim[1]], [0.2, 0.2, self.perspective_dim[2]]], scale=1)
+        self.view_param[0] = get_perspective_kernels([[0, 0, self.perspective_dim[0]], [-0.2, 0.2, self.perspective_dim[1]], [-0.2, 0.2, self.perspective_dim[2]]], scale=1)
 
         self.part[1] = get_perspective_kernels([[0, 0, 1], [-0.5, 0.5, 3], [-0.5, 0.5, 3]], scale=2)
-        self.view_param[1] = get_perspective_kernels([[0, 0, self.perspective_dim[0]], [-0.1, 0.1, self.perspective_dim[1]], [0.1, 0.1, self.perspective_dim[2]]], scale=1)
+        self.view_param[1] = get_perspective_kernels([[0, 0, self.perspective_dim[0]], [-0.1, 0.1, self.perspective_dim[1]], [-0.1, 0.1, self.perspective_dim[2]]], scale=1)
 
         # self.part[2] = get_perspective_kernels([[0, 0, 1], [-0.2, 0.2, 3], [-0.2, 0.2, 3]], scale=2)
-        # self.view_param[2] = get_perspective_kernels([[0, 0, self.perspective_dim[0]], [-0.05, 0.05, self.perspective_dim[1]], [0.05, 0.05, self.perspective_dim[2]]], scale=1)
+        # self.view_param[2] = get_perspective_kernels([[0, 0, self.perspective_dim[0]], [-0.05, 0.05, self.perspective_dim[1]], [-0.05, 0.05, self.perspective_dim[2]]], scale=1)
 
         self.models = {}
-        self.episodic = [Nearest_Neighbor(device, output_is_tensor=False) for i in range(1)]
+        self.episodic = [Nearest_Neighbor(device, output_is_tensor=False) for i in range(0)]
         self.semantic = Nearest_Neighbor(device, k=k)
 
         self.running_base_position = 0
@@ -69,7 +69,7 @@ class Active_Classifier:
 
             _id = id + str(i)
             if _id not in self.models:
-                self.models[_id] = Conceptor(self.device, max_bases=10)
+                self.models[_id] = Conceptor(self.device, max_bases=-1)
 
             if self.models[_id].get_count() == 0:
                 _projected = torch.zeros(_flat.shape, device=self.device)
