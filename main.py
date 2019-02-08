@@ -14,7 +14,7 @@ class Active_Classifier:
         self.num_classes = num_classes
 
         # width, height
-        self.sample_size = (9, 9)
+        self.sample_size = (5, 5)
         self.perspective_dim = (1, 19, 19)
         self.perspective_count = self.perspective_dim[0] * self.perspective_dim[1] * self.perspective_dim[2]
 
@@ -35,6 +35,7 @@ class Active_Classifier:
         self.semantic = Nearest_Neighbor(device)
 
         self.running_base_position = 0
+        self.empty = True
 
     def to_tensor(self, input, dtype=torch.float32):
         return torch.tensor(input, dtype=dtype, device=self.device)
@@ -45,7 +46,7 @@ class Active_Classifier:
         index = torch.argmin(score, dim=1, keepdim=True)
         return index
 
-    def forward(self, input, layer, id="", base_perspective=None, force_center=False):
+    def sample_patches(self, input, layer, id="", base_perspective=None, force_center=False):
         batches = input.shape[0]
 
         patches = []
@@ -92,54 +93,48 @@ class Active_Classifier:
                 min_view_param = self.view_param[layer][np.squeeze(min_index.cpu().numpy()), ...]
                 if len(min_view_param.shape) < 3:
                     min_view_param = np.expand_dims(min_view_param, 0)
-                _ps, _ids, _bs = self.forward(input, layer + 1, _id, min_view_param, force_center)
+                _ps, _ids, _bs = self.sample_patches(input, layer + 1, _id, min_view_param, force_center)
                 patches += _ps
                 ids += _ids
                 best_scores += _bs
 
         return patches, ids, best_scores
 
-    def resolve(self, patches_list, ids_list):
+    def resolve(self, patches_list):
         _b = torch.stack(patches_list, dim=1)
         return torch.reshape(_b, [_b.shape[0], -1])
 
-    def classify(self, input):
-        # patches = [tensor(batch, ...)]
-        # ids = [id]
-        patches, ids, _ = self.forward(input, 0, "", None)
+    def forward(self, patches, ids, scores):
+        batch = patches[0].shape[0]
 
-        ids_list = [[ids[0]] * input.shape[0]]
+        indices_list = [[0] * batch]
         patches_list = [patches[0]]
         for i in range(len(self.episodic)):
             id_by_batch = self.episodic[i] << (patches_list[0])
+            index_by_batch = []
             patch_by_batch = []
-            for j in range(input.shape[0]):
+            for j in range(batch):
                 index = ids.index(id_by_batch[j])
+                index_by_batch.append(index)
                 patch_by_batch.append(patches[index][j, ...])
-            ids_list.append(id_by_batch)
+            indices_list.append(index_by_batch)
             patches_list.append(torch.stack(patch_by_batch, dim=0))
 
-        logits = self.resolve(patches_list, ids_list)
+        logits = self.resolve(patches_list)
         prediction = self.semantic << logits
-        return prediction
+        return prediction, indices_list
 
-    def learn(self, input, output, force_center=False):
-        # patches = [tensor(batch, ...)]
-        # ids = [id]
-        # scores = [tensor(batch)]
-        patches, ids, scores = self.forward(input, 0, "", None, force_center)
+    def backward(self, patches, ids, scores, indices):
+        batch = patches[0].shape[0]
 
-        t_scores = torch.stack(scores, dim=1)
-        _, indices = torch.topk(t_scores[:, 1:], len(self.episodic), dim=1, largest=True)
-
-        ids_list = [[ids[0]] * input.shape[0]]
+        ids_list = [[ids[0]] * batch]
         patches_list = [patches[0]]
         for i in range(len(self.episodic)):
 
             id_by_batch = []
             patch_by_batch = []
-            for j in range(input.shape[0]):
-                index = indices[j, i].item()
+            for j in range(batch):
+                index = indices[i][j]
                 _id = ids[index]
                 _patch = patches[index][j:(j + 1), ...]
                 id_by_batch.append(_id)
@@ -150,8 +145,61 @@ class Active_Classifier:
             ids_list.append(id_by_batch)
             patches_list.append(torch.stack(patch_by_batch, dim=0))
 
-        logits = self.resolve(patches_list, ids_list)
+        logits = self.resolve(patches_list)
         self.semantic.learn(logits, output, num_classes=self.num_classes)
+
+    def classify(self, input, force_center=False):
+
+        # patches = [tensor(batch, ...)]
+        # ids = [id]
+        # scores = [tensor(batch)]
+        patches, ids, scores = self.sample_patches(input, 0, "", None, force_center)
+
+        # prediction = tensor(batch)
+        # res_ids_list = [[id1, id2, ...]]
+        prediction, classify_indices_list = self.forward(patches, ids, scores)
+
+        return prediction
+
+    def classify_then_learn(self, input, output, force_center=False):
+
+        batch = input.shape[0]
+
+        # patches = [tensor(batch, ...)]
+        # ids = [id]
+        # scores = [tensor(batch)]
+        patches, ids, scores = self.sample_patches(input, 0, "", None, force_center)
+
+        _, salient_indices_list = torch.topk(torch.stack(scores, dim=1)[:, 1:], len(self.episodic), dim=1, largest=True)
+
+        prediction = None
+        classify_indices_list = None
+        indices = []
+        if self.empty:
+            for i in range(len(self.episodic)):
+                _i = []
+                for j in range(batch):
+                    _i.append(salient_indices_list[j, i].item())
+                indices.append(_i)
+        else:
+            # prediction = tensor(batch)
+            # res_ids_list = [[id1, id2, ...]]
+            prediction, classify_indices_list = self.forward(patches, ids, scores)
+            correct_or_not = (prediction == output)
+
+            for i in range(len(self.episodic)):
+                _i = []
+                for j in range(batch):
+                    if correct_or_not[j]:
+                        _i.append(classify_indices_list[i][j])
+                    else:
+                        _i.append(salient_indices_list[j, i].item())
+                indices.append(_i)
+
+        self.backward(patches, ids, scores, indices)
+        self.empty = False
+
+        return prediction
 
 
 if __name__ == "__main__":
@@ -160,7 +208,7 @@ if __name__ == "__main__":
     device = torch.device("cuda:0")
 
     batch_size = 1
-    dataset = FashionMNIST(device, batch_size=batch_size, max_per_class=60, seed=10, group_size=2)
+    dataset = FashionMNIST(device, batch_size=batch_size, max_per_class=100, seed=0, group_size=1)
 
     classifier = Active_Classifier(device, 10)
 
@@ -172,20 +220,22 @@ if __name__ == "__main__":
         output = label.to(device)
 
         # online test
-        if i >= 1:
-            prediction = classifier.classify(input).cpu()
-            count_correct = np.sum(prediction.numpy() == label.numpy())
+        prediction = classifier.classify_then_learn(input, output, i < 40)
+
+        if prediction is not None:
+            prediction_cpu = prediction.cpu()
+            correct = (prediction == output)
+            count_correct = np.sum(correct.cpu().numpy())
             percent_correct = 0.99 * percent_correct + 0.01 * count_correct * 100 / batch_size
             print("Truth: ", dataset.readout(label))
-            print("Guess: ", dataset.readout(prediction))
+            print("Guess: ", dataset.readout(prediction_cpu))
             print("Percent correct: ", percent_correct)
-
-        classifier.learn(input, output, i < 10)
 
         img = np.reshape(data.numpy(), [-1, data.shape[2]])
         cv2.imshow("sample", img)
         cv2.waitKey(10)
 
+    print("Computing backward scores...")
     count = 0
     for i, (data, label) in enumerate(dataset):
         input = data.to(device)
