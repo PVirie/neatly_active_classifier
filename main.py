@@ -8,13 +8,13 @@ from perspective import *
 
 
 class Active_Classifier:
-    def __init__(self, device, num_classes):
+    def __init__(self, device, num_classes, k=1):
         print("init")
         self.device = device
         self.num_classes = num_classes
 
         # width, height
-        self.sample_size = (5, 5)
+        self.sample_size = (9, 9)
         self.perspective_dim = (1, 19, 19)
         self.perspective_count = self.perspective_dim[0] * self.perspective_dim[1] * self.perspective_dim[2]
 
@@ -31,8 +31,8 @@ class Active_Classifier:
         # self.view_param[2] = get_perspective_kernels([[0, 0, self.perspective_dim[0]], [-0.05, 0.05, self.perspective_dim[1]], [0.05, 0.05, self.perspective_dim[2]]], scale=1)
 
         self.models = {}
-        self.episodic = [Nearest_Neighbor(device, output_is_tensor=False) for i in range(3)]
-        self.semantic = Nearest_Neighbor(device)
+        self.episodic = [Nearest_Neighbor(device, output_is_tensor=False) for i in range(1)]
+        self.semantic = Nearest_Neighbor(device, k=k)
 
         self.running_base_position = 0
         self.empty = True
@@ -81,7 +81,7 @@ class Active_Classifier:
                 min_index = torch.full([input.shape[0], 1], self.perspective_count // 2, device=self.device, dtype=torch.int64)
             else:
                 min_index = self.get_min_index(scores)
-            min_indices = torch.unsqueeze(min_index, 2).repeat(1, 1, perspectives.shape[3])
+            min_indices = torch.unsqueeze(min_index, 2).expand(1, 1, perspectives.shape[3])
             min_perspective = torch.gather(perspectives[:, i, ...], 1, min_indices)[:, 0, ...]
             min_scores = torch.gather(scores, 1, min_index)[:, 0]
 
@@ -100,13 +100,21 @@ class Active_Classifier:
 
         return patches, ids, best_scores
 
-    def resolve(self, patches_list):
+    def resolve(self, patches_list, ids_list):
+        batch = patches_list[0].shape[0]
+
+        # patches_list = [tensor(batch, ...)]
+        # ids_list = [[id]]
+
         _b = torch.stack(patches_list, dim=1)
-        return torch.reshape(_b, [_b.shape[0], -1])
+        out = torch.reshape(_b, [_b.shape[0], -1])
+
+        return out
 
     def forward(self, patches, ids, scores):
         batch = patches[0].shape[0]
 
+        ids_list = [[ids[0]] * batch]
         indices_list = [[0] * batch]
         patches_list = [patches[0]]
         for i in range(len(self.episodic)):
@@ -114,14 +122,15 @@ class Active_Classifier:
             index_by_batch = []
             patch_by_batch = []
             for j in range(batch):
-                index = ids.index(id_by_batch[j])
+                index = ids.index(id_by_batch[j][0])
                 index_by_batch.append(index)
                 patch_by_batch.append(patches[index][j, ...])
             indices_list.append(index_by_batch)
+            ids_list.append([item[0] for item in id_by_batch])
             patches_list.append(torch.stack(patch_by_batch, dim=0))
 
-        logits = self.resolve(patches_list)
-        prediction = self.semantic << logits
+        logits = self.resolve(patches_list, ids_list)
+        prediction = (self.semantic << logits)
         return prediction, indices_list
 
     def backward(self, patches, ids, scores, indices):
@@ -129,6 +138,7 @@ class Active_Classifier:
 
         ids_list = [[ids[0]] * batch]
         patches_list = [patches[0]]
+        self.models[ids[0]].learn(patches[0], 1, start_base_order=self.running_base_position, expand_threshold=1e-3)
         for i in range(len(self.episodic)):
 
             id_by_batch = []
@@ -140,12 +150,12 @@ class Active_Classifier:
                 id_by_batch.append(_id)
                 patch_by_batch.append(_patch[0, ...])
                 self.running_base_position += self.models[_id].learn(_patch, 1, start_base_order=self.running_base_position, expand_threshold=1e-3)
-            self.episodic[i].learn(patches_list[i], id_by_batch, num_classes=len(self.models))
 
+            self.episodic[i].learn(patches_list[i], id_by_batch, num_classes=len(self.models))
             ids_list.append(id_by_batch)
             patches_list.append(torch.stack(patch_by_batch, dim=0))
 
-        logits = self.resolve(patches_list)
+        logits = self.resolve(patches_list, ids_list)
         self.semantic.learn(logits, output, num_classes=self.num_classes)
 
     def classify(self, input, force_center=False):
@@ -185,7 +195,7 @@ class Active_Classifier:
             # prediction = tensor(batch)
             # res_ids_list = [[id1, id2, ...]]
             prediction, classify_indices_list = self.forward(patches, ids, scores)
-            correct_or_not = (prediction == output)
+            correct_or_not = (prediction[:, 0] == output)
 
             for i in range(len(self.episodic)):
                 _i = []
@@ -208,9 +218,9 @@ if __name__ == "__main__":
     device = torch.device("cuda:0")
 
     batch_size = 1
-    dataset = FashionMNIST(device, batch_size=batch_size, max_per_class=100, seed=0, group_size=1)
+    dataset = FashionMNIST(device, batch_size=batch_size, max_per_class=100, seed=0, group_size=2)
 
-    classifier = Active_Classifier(device, 10)
+    classifier = Active_Classifier(device, 10, k=5)
 
     percent_correct = 0.0
     for i, (data, label) in enumerate(dataset):
@@ -224,11 +234,11 @@ if __name__ == "__main__":
 
         if prediction is not None:
             prediction_cpu = prediction.cpu()
-            correct = (prediction == output)
+            correct = (prediction[:, 0] == output)
             count_correct = np.sum(correct.cpu().numpy())
             percent_correct = 0.99 * percent_correct + 0.01 * count_correct * 100 / batch_size
             print("Truth: ", dataset.readout(label))
-            print("Guess: ", dataset.readout(prediction_cpu))
+            print("Guess: ", dataset.readout(prediction_cpu.flatten()))
             print("Percent correct: ", percent_correct)
 
         img = np.reshape(data.numpy(), [-1, data.shape[2]])
@@ -243,6 +253,6 @@ if __name__ == "__main__":
 
         # test
         prediction = classifier.classify(input).cpu()
-        count = count + np.sum(prediction.numpy() == label.numpy())
+        count = count + np.sum(prediction.numpy()[:, 0] == label.numpy())
 
     print("Percent correct: ", count * 100 / (len(dataset) * batch_size))
