@@ -31,7 +31,7 @@ class Active_Classifier:
         # self.view_param[2] = get_perspective_kernels([[0, 0, self.perspective_dim[0]], [-0.05, 0.05, self.perspective_dim[1]], [-0.05, 0.05, self.perspective_dim[2]]], scale=1)
 
         self.models = {}
-        self.episodic = [Nearest_Neighbor(device, output_is_tensor=False) for i in range(0)]
+        self.episodic = [Nearest_Neighbor(device, output_is_tensor=False) for i in range(3)]
         self.semantic = Nearest_Neighbor(device, k=k)
 
         self.running_base_position = 0
@@ -69,7 +69,7 @@ class Active_Classifier:
 
             _id = id + str(i)
             if _id not in self.models:
-                self.models[_id] = Conceptor(self.device, max_bases=-1)
+                self.models[_id] = Conceptor(self.device, max_bases=20)
 
             if self.models[_id].get_count() == 0:
                 _projected = torch.zeros(_flat.shape, device=self.device)
@@ -81,7 +81,7 @@ class Active_Classifier:
                 min_index = torch.full([input.shape[0], 1], self.perspective_count // 2, device=self.device, dtype=torch.int64)
             else:
                 min_index = self.get_min_index(scores)
-            min_indices = torch.unsqueeze(min_index, 2).expand(1, 1, perspectives.shape[3])
+            min_indices = torch.unsqueeze(min_index, 2).repeat(1, 1, perspectives.shape[3])
             min_perspective = torch.gather(perspectives[:, i, ...], 1, min_indices)[:, 0, ...]
             min_scores = torch.gather(scores, 1, min_index)[:, 0]
 
@@ -100,63 +100,68 @@ class Active_Classifier:
 
         return patches, ids, best_scores
 
-    def resolve(self, patches_list, ids_list):
-        batch = patches_list[0].shape[0]
-
-        # patches_list = [tensor(batch, ...)]
-        # ids_list = [[id]]
-
-        _b = torch.stack(patches_list, dim=1)
-        out = torch.reshape(_b, [_b.shape[0], -1])
-
+    def reorder_bases(self, bases_list, id_list):
+        ranks = []
+        for _id in id_list:
+            ranks.extend(self.models[_id].get_orders())
+        _b = torch.cat(bases_list, dim=1)
+        orders = np.argsort(np.array(ranks, dtype=np.int32))
+        out = _b[:, orders]
         return out
 
     def forward(self, patches, ids, scores):
         batch = patches[0].shape[0]
 
-        ids_list = [[ids[0]] * batch]
-        indices_list = [[0] * batch]
-        patches_list = [patches[0]]
-        for i in range(len(self.episodic)):
-            id_by_batch = self.episodic[i] << (torch.cat(patches_list, dim=1))
-            index_by_batch = []
-            patch_by_batch = []
-            for j in range(batch):
-                index = ids.index(id_by_batch[j][0])
-                index_by_batch.append(index)
-                patch_by_batch.append(patches[index][j, ...])
-            indices_list.append(index_by_batch)
-            ids_list.append([item[0] for item in id_by_batch])
-            patches_list.append(torch.stack(patch_by_batch, dim=0))
+        def __forward_loop_content(bj, index, id_list, bases_list):
+            _id = ids[index]
+            _patch = patches[index][bj:(bj + 1), ...]
+            _bases = self.models[_id] << _patch
+            bases_list.append(_bases)
+            id_list.append(_id)
+            return self.reorder_bases(bases_list, id_list)
 
-        logits = self.resolve(patches_list, ids_list)
-        prediction = (self.semantic << logits)
-        return prediction, indices_list
+        prediction_by_batch = []
+        indices_by_batch = []
+        for j in range(batch):
 
-    def backward(self, patches, ids, scores, indices):
+            id_list = []
+            bases_list = []
+            index_list = [0]
+            for i in range(len(self.episodic)):
+                bases = __forward_loop_content(j, index_list[i], id_list, bases_list)
+                next_id = self.episodic[i] << bases
+                index_list.append(ids.index(next_id[0][0]))
+            bases = __forward_loop_content(j, index_list[-1], id_list, bases_list)
+
+            prediction = (self.semantic << bases)
+            prediction_by_batch.append(prediction)
+            indices_by_batch.append(index_list)
+
+        output_prediction = torch.cat(prediction_by_batch, dim=0)
+        return output_prediction, indices_by_batch
+
+    def backward(self, patches, ids, scores, indices, outputs):
         batch = patches[0].shape[0]
 
-        ids_list = [[ids[0]] * batch]
-        patches_list = [patches[0]]
-        self.models[ids[0]].learn(patches[0], 1, start_base_order=self.running_base_position, expand_threshold=1e-3)
-        for i in range(len(self.episodic)):
+        def __backward_loop_content(bj, index, id_list, bases_list):
+            _id = ids[index]
+            _patch = patches[index][bj:(bj + 1), ...]
+            self.running_base_position += self.models[_id].learn(_patch, 1, start_base_order=self.running_base_position, expand_threshold=1e-3)
+            _bases = self.models[_id] << _patch
+            bases_list.append(_bases)
+            id_list.append(_id)
+            return self.reorder_bases(bases_list, id_list)
 
-            id_by_batch = []
-            patch_by_batch = []
-            for j in range(batch):
-                index = indices[i][j]
-                _id = ids[index]
-                _patch = patches[index][j:(j + 1), ...]
-                id_by_batch.append(_id)
-                patch_by_batch.append(_patch[0, ...])
-                self.running_base_position += self.models[_id].learn(_patch, 1, start_base_order=self.running_base_position, expand_threshold=1e-3)
+        for j in range(batch):
 
-            self.episodic[i].learn(torch.cat(patches_list, dim=1), id_by_batch, num_classes=len(self.models))
-            ids_list.append(id_by_batch)
-            patches_list.append(torch.stack(patch_by_batch, dim=0))
+            id_list = []
+            bases_list = []
+            for i in range(len(self.episodic)):
+                bases = __backward_loop_content(j, indices[j][i], id_list, bases_list)
+                self.episodic[i].learn(bases, [ids[indices[j][i + 1]]], num_classes=len(self.models))
+            bases = __backward_loop_content(j, indices[j][len(self.episodic)], id_list, bases_list)
 
-        logits = self.resolve(patches_list, ids_list)
-        self.semantic.learn(logits, output, num_classes=self.num_classes)
+            self.semantic.learn(bases, outputs[j:(j + 1)], num_classes=self.num_classes)
 
     def classify(self, input, force_center=False):
 
@@ -181,32 +186,30 @@ class Active_Classifier:
         patches, ids, scores = self.sample_patches(input, 0, "", None, force_center)
 
         _, salient_indices_list = torch.topk(torch.stack(scores, dim=1)[:, 1:], len(self.episodic), dim=1, largest=True)
+        salient_indices_list = salient_indices_list + 1
 
         prediction = None
         classify_indices_list = None
-        indices = []
+        indices = [[0]] * batch
+
         if self.empty:
-            for i in range(len(self.episodic)):
-                _i = []
-                for j in range(batch):
-                    _i.append(salient_indices_list[j, i].item())
-                indices.append(_i)
+            for j in range(batch):
+                for i in range(len(self.episodic)):
+                    indices[j].append(salient_indices_list[j, i].item())
         else:
             # prediction = tensor(batch)
             # res_ids_list = [[id1, id2, ...]]
             prediction, classify_indices_list = self.forward(patches, ids, scores)
             correct_or_not = (prediction[:, 0] == output)
 
-            for i in range(len(self.episodic)):
-                _i = []
-                for j in range(batch):
+            for j in range(batch):
+                for i in range(len(self.episodic)):
                     if correct_or_not[j]:
-                        _i.append(classify_indices_list[i][j])
+                        indices[j].append(classify_indices_list[j][i + 1])
                     else:
-                        _i.append(salient_indices_list[j, i].item())
-                indices.append(_i)
+                        indices[j].append(salient_indices_list[j, i].item())
 
-        self.backward(patches, ids, scores, indices)
+        self.backward(patches, ids, scores, indices, output)
         self.empty = False
 
         return prediction
@@ -220,7 +223,7 @@ if __name__ == "__main__":
     batch_size = 1
     dataset = FashionMNIST(device, batch_size=batch_size, max_per_class=60, seed=0, group_size=2)
 
-    classifier = Active_Classifier(device, 10, k=5)
+    classifier = Active_Classifier(device, 10, k=1)
 
     percent_correct = 0.0
     for i, (data, label) in enumerate(dataset):
@@ -230,7 +233,7 @@ if __name__ == "__main__":
         output = label.to(device)
 
         # online test
-        prediction = classifier.classify_then_learn(input, output, i < 100)
+        prediction = classifier.classify_then_learn(input, output, i < 20)
 
         if prediction is not None:
             prediction_cpu = prediction.cpu()
