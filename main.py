@@ -118,7 +118,7 @@ class Active_Classifier:
         indices_list = [[0] * batch]
         patches_list = [patches[0]]
         for i in range(len(self.episodic)):
-            id_by_batch = self.episodic[i] << (patches_list[0])
+            id_by_batch = self.episodic[i] << (torch.cat(patches_list, dim=1))
             index_by_batch = []
             patch_by_batch = []
             for j in range(batch):
@@ -151,7 +151,7 @@ class Active_Classifier:
                 patch_by_batch.append(_patch[0, ...])
                 self.running_base_position += self.models[_id].learn(_patch, 1, start_base_order=self.running_base_position, expand_threshold=1e-3)
 
-            self.episodic[i].learn(patches_list[i], id_by_batch, num_classes=len(self.models))
+            self.episodic[i].learn(torch.cat(patches_list, dim=1), id_by_batch, num_classes=len(self.models))
             ids_list.append(id_by_batch)
             patches_list.append(torch.stack(patch_by_batch, dim=0))
 
@@ -218,7 +218,7 @@ if __name__ == "__main__":
     device = torch.device("cuda:0")
 
     batch_size = 1
-    dataset = FashionMNIST(device, batch_size=batch_size, max_per_class=100, seed=0, group_size=2)
+    dataset = FashionMNIST(device, batch_size=batch_size, max_per_class=60, seed=0, group_size=2)
 
     classifier = Active_Classifier(device, 10, k=5)
 
@@ -230,7 +230,7 @@ if __name__ == "__main__":
         output = label.to(device)
 
         # online test
-        prediction = classifier.classify_then_learn(input, output, i < 40)
+        prediction = classifier.classify_then_learn(input, output, i < 100)
 
         if prediction is not None:
             prediction_cpu = prediction.cpu()
