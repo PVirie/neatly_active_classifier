@@ -28,7 +28,7 @@ class FashionMNIST:
 
         count = 0
         for i in range(len(indices)):
-            label = self.dataset[indices[i]][1].item()
+            label = self.dataset[indices[i]][1]
             if len(class_dict[label]) < max_per_class:
                 class_dict[label].append(indices[i])
                 count = count + 1
@@ -66,7 +66,7 @@ class FashionMNIST:
             datum, label = self.dataset[self.pointer[self.index_iterator]]
             self.index_iterator = self.index_iterator + 1
             data.append(datum)
-            labels.append(label)
+            labels.append(torch.tensor(label))
 
         tensor_data = torch.stack(data, dim=0)
         tensor_labels = torch.stack(labels, dim=0)
